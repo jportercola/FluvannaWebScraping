@@ -1,0 +1,184 @@
+# PDF Analyzer
+## Analyzes downloaded pdfs for the presence of a list of project names, then returns CSV that lists each project, 
+## along with the filenames of all files in the directory that mention that project
+
+import os
+import csv
+import re
+import argparse
+import pandas as pd
+import PyPDF2
+from pathlib import Path
+
+class Args:
+    projects = r'CasesXParcelmod3.csv'
+    pdf_dir = r'G:\Python Scripts\DevProjectsScraper\downloads_sorted\agenda'
+    output = r'project_mentions.csv'
+
+args = Args()
+
+
+def extract_text_from_pdf(pdf_path):
+    """Extract text content from a PDF file."""
+    text = ""
+    try:
+        with open(pdf_path, 'rb') as file:
+            pdf_reader = PyPDF2.PdfReader(file)
+            for page_num in range(len(pdf_reader.pages)):
+                text += pdf_reader.pages[page_num].extract_text() + " "
+    except Exception as e:
+        print(f"Error processing {pdf_path}: {str(e)}")
+    return text
+
+
+def read_project_names(csv_path, site_id_col=0, project_name_col=6, alternate_name_col=7):
+    """Read site IDs, project names and their alternates from a CSV file.
+    
+    Args:
+        csv_path: Path to CSV file
+        site_id_col: Index or name of the column containing site IDs (default: 0 - first column)
+        project_name_col: Index or name of the column containing project names (default: 1 - second column)
+        alternate_name_col: Index or name of the column containing alternate names (default: 2 - third column)
+        
+    Returns:
+        List of tuples containing (site_id, primary_name, alternate_name)
+    """
+    project_data = []  # List to store project data
+
+
+    try:
+        df = pd.read_csv(csv_path)
+        
+        # Convert column indices to names if needed
+        if isinstance(site_id_col, int):
+            if site_id_col < len(df.columns):
+                site_id_col = df.columns[site_id_col]
+            else:
+                raise ValueError(f"Site ID column index {site_id_col} out of range")
+                
+        if isinstance(project_name_col, int):
+            if project_name_col < len(df.columns):
+                project_name_col = df.columns[project_name_col]
+            else:
+                raise ValueError(f"Project name column index {project_name_col} out of range")
+                
+        if isinstance(alternate_name_col, int):
+            if alternate_name_col < len(df.columns):
+                alternate_name_col = df.columns[alternate_name_col]
+            else:
+                raise ValueError(f"Alternate name column index {alternate_name_col} out of range")
+        
+        print(f"Using columns: Site ID='{site_id_col}', Project Name='{project_name_col}', Alternate Name='{alternate_name_col}'")
+        
+        # Process each row
+        for _, row in df.iterrows():
+            site_id = str(row[site_id_col]).strip()
+            primary_name = str(row[project_name_col]).strip()
+            alternate_name = str(row[alternate_name_col]).strip() if pd.notna(row[alternate_name_col]) else ""
+            
+            # Store the data (only if we have valid primary name)
+            if primary_name:
+                project_data.append((site_id, primary_name, alternate_name))
+    
+    except Exception as e:
+        print(f"Error reading project names from CSV: {str(e)}")
+    print(df.columns.tolist())
+    return project_data
+
+
+def analyze_pdfs(pdf_dir, project_data):
+    """Analyze PDFs for mentions of project names (primary and alternate).
+    
+    Args:
+        pdf_dir: Directory containing PDF files
+        project_data: List of tuples with (site_id, primary_name, alternate_name)
+        
+    Returns:
+        Dictionary with (site_id, primary_name, alternate_name) tuples as keys and lists of matching filenames as values
+    """
+    # Create unique key for each project entry
+    results = {}
+    for project_entry in project_data:
+        results[project_entry] = []
+    
+    # Get all PDF files in the directory
+    pdf_files = [f for f in os.listdir(pdf_dir) if f.lower().endswith('.pdf')]
+    
+    for pdf_file in pdf_files:
+        pdf_path = os.path.join(pdf_dir, pdf_file)
+        print(f"Processing {pdf_file}...")
+        
+        # Extract text from PDF
+        pdf_text = extract_text_from_pdf(pdf_path)
+        
+        # Check for each project name (both primary and alternate)
+        for project_entry in project_data:
+            site_id, primary_name, alternate_name = project_entry
+            
+            # Check primary name
+            primary_pattern = r'\b' + re.escape(primary_name) + r'\b'
+            primary_match = re.search(primary_pattern, pdf_text, re.IGNORECASE)
+            
+            # Check alternate name if it exists
+            alternate_match = False
+            if alternate_name:
+                alternate_pattern = r'\b' + re.escape(alternate_name) + r'\b'
+                alternate_match = re.search(alternate_pattern, pdf_text, re.IGNORECASE)
+            
+            # If either name matches, add to results
+            if primary_match or alternate_match:
+                results[project_entry].append(pdf_file)
+    
+    return results
+
+
+def save_results_to_csv(results, output_path):
+    """Save results to a CSV file with site IDs, project names and matching files.
+    
+    Args:
+        results: Dictionary with (site_id, primary_name, alternate_name) tuples as keys and lists of matching files as values
+        output_path: Path to save the output CSV
+    """
+    data = []
+    for project_entry, files in results.items():
+        if files:  # Only include projects with matching files
+            site_id, primary_name, alternate_name = project_entry
+            file_list = '; '.join(files)
+            data.append({
+                'Site ID': site_id,
+                'Project Name': primary_name,
+                'Alternate Name': alternate_name,
+                'Files': file_list
+            })
+    
+    df = pd.DataFrame(data)
+    df.to_csv(output_path, index=False)
+    print(f"Results saved to {output_path}")
+
+
+def main():
+    # Use hardcoded args from the Args class
+    global args
+    
+    # Create output directory if it doesn't exist
+    output_dir = os.path.dirname(args.output)
+    if output_dir and not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    
+    # Read project data
+    project_data = read_project_names(args.projects)
+    print(f"Found {len(project_data)} project entries")
+    
+    # Count unique site IDs
+    unique_sites = len(set(entry[0] for entry in project_data))
+    print(f"Found {unique_sites} unique site IDs")
+    
+    # Analyze PDFs
+    results = analyze_pdfs(args.pdf_dir, project_data)
+    
+    # Save results
+    save_results_to_csv(results, args.output)
+
+
+if __name__ == "__main__":
+    main()
